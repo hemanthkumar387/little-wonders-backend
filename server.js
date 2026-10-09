@@ -9,19 +9,21 @@ const app = express();
 
 const allowedOrigins = [
   "http://localhost:5173",
-  "https://little-wonders-seven.vercel.app/",
+  "https://little-wonders-seven.vercel.app",
 ];
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests without an Origin header, such as local scripts.
+      // Allow requests without an Origin header, such as server-to-server requests.
       if (!origin || allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
 
-      return callback(new Error("Origin not allowed by CORS"));
+      return callback(new Error(`CORS blocked for origin: ${origin}`));
     },
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   }),
 );
 
