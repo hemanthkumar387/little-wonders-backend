@@ -7,9 +7,7 @@ dotenv.config();
 
 const app = express();
 
-const allowedOrigins = [
-  "https://little-wonders-seven.vercel.app",
-];
+const allowedOrigins = ["https://little-wonders-seven.vercel.app"];
 
 app.use(
   cors({
@@ -70,11 +68,17 @@ ${message}
       message: "Your message has been sent successfully!",
     });
   } catch (error) {
-    console.error("Email error:", error.message);
+    console.error("Checkout email error:", {
+      message: error.message,
+      code: error.code,
+      responseCode: error.responseCode,
+      command: error.command,
+      stack: error.stack,
+    });
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: "Unable to send your message. Please try again later.",
+      message: "We couldn't send your order request. Please try again later.",
     });
   }
 });
