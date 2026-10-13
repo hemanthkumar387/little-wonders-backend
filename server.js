@@ -23,7 +23,7 @@ app.use(
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
-  })
+  }),
 );
 
 app.use(express.json({ limit: "100kb" }));
@@ -31,11 +31,8 @@ app.use(express.json({ limit: "100kb" }));
 // Resend email API
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// Recipient inbox: your Gmail address or another inbox.
 const recipientEmail = process.env.EMAIL_USER;
 
-// Use a verified domain for production.
-// The fallback is for Resend's permitted test emails only.
 const senderEmail =
   process.env.EMAIL_FROM || "LittleWonders <onboarding@resend.dev>";
 
@@ -64,6 +61,76 @@ async function sendEmail({ subject, text, replyTo }) {
   }
 
   return data;
+}
+
+// Helpers for formatting order details
+const formatMoney = (amount) =>
+  `₹${Number(amount).toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+
+const formatOptionValue = (value) => {
+  if (value === null || value === undefined || value === "") {
+    return "Not specified";
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(formatOptionValue).join(", ");
+  }
+
+  if (typeof value === "object") {
+    return Object.entries(value)
+      .map(([key, nestedValue]) => `${key}: ${formatOptionValue(nestedValue)}`)
+      .join("; ");
+  }
+
+  return String(value);
+};
+
+// Include every selected option in the email.
+function formatSelectedOptions(item) {
+  const selectedOptions =
+    item.selectedOptions &&
+    typeof item.selectedOptions === "object" &&
+    !Array.isArray(item.selectedOptions)
+      ? item.selectedOptions
+      : {};
+
+  const optionEntries = Object.entries(selectedOptions).filter(
+    ([, value]) =>
+      value !== null &&
+      value !== undefined &&
+      value !== "" &&
+      !(Array.isArray(value) && value.length === 0),
+  );
+
+  if (optionEntries.length > 0) {
+    return optionEntries
+      .map(
+        ([key, value]) =>
+          `   ${key}: ${formatOptionValue(value)}`,
+      )
+      .join("\n");
+  }
+
+  // Fallback for products using variant labels.
+  if (typeof item.variantLabel === "string" && item.variantLabel.trim()) {
+    return item.variantLabel
+      .split(" | ")
+      .map((option) => `   ${option.trim()}`)
+      .join("\n");
+  }
+
+  // Fallback for products using an option summary.
+  if (typeof item.optionSummary === "string" && item.optionSummary.trim()) {
+    return item.optionSummary
+      .split(" | ")
+      .map((option) => `   ${option.trim()}`)
+      .join("\n");
+  }
+
+  return "   No custom options selected";
 }
 
 // Contact form email API
@@ -143,6 +210,7 @@ app.post("/api/checkout", async (req, res) => {
   try {
     const { customer, items } = req.body || {};
 
+    // Validate customer details
     if (
       !customer ||
       typeof customer.name !== "string" ||
@@ -162,22 +230,28 @@ app.post("/api/checkout", async (req, res) => {
       });
     }
 
+    const name = customer.name.trim();
+    const phone = customer.phone.trim();
+    const address = customer.address.trim();
+    const city = customer.city.trim();
+    const pincode = customer.pincode.trim();
+    const notes =
+      typeof customer.notes === "string" ? customer.notes.trim() : "";
+    const email =
+      typeof customer.email === "string" ? customer.email.trim() : "";
+
     if (
-      customer.name.length > 100 ||
-      customer.address.length > 500 ||
-      customer.city.length > 100 ||
-      (typeof customer.notes === "string" && customer.notes.length > 500)
+      name.length > 100 ||
+      address.length > 500 ||
+      city.length > 100 ||
+      pincode.length > 6 ||
+      notes.length > 500
     ) {
       return res.status(400).json({
         success: false,
         message: "Some customer details are too long.",
       });
     }
-
-    const phone = customer.phone.trim();
-    const pincode = customer.pincode.trim();
-    const email =
-      typeof customer.email === "string" ? customer.email.trim() : "";
 
     if (!/^[0-9]{10}$/.test(phone)) {
       return res.status(400).json({
@@ -211,16 +285,25 @@ app.post("/api/checkout", async (req, res) => {
       });
     }
 
-    // Validate and normalize submitted item details.
-    const safeItems = items.map((item) => {
+    // Validate and preserve product customizations.
+    const safeItems = [];
+
+    for (const item of items) {
+      if (!item || typeof item !== "object") {
+        return res.status(400).json({
+          success: false,
+          message: "One or more order items are invalid.",
+        });
+      }
+
       const quantity = Number(item.quantity);
       const price = Number(item.price);
-      const name =
+      const productName =
         typeof item.name === "string" ? item.name.trim() : "";
 
       if (
-        !name ||
-        name.length > 200 ||
+        !productName ||
+        productName.length > 200 ||
         !Number.isInteger(quantity) ||
         quantity < 1 ||
         quantity > 1000 ||
@@ -228,75 +311,109 @@ app.post("/api/checkout", async (req, res) => {
         price < 0 ||
         price > 10000000
       ) {
-        throw new Error("The cart contains invalid item details.");
+        return res.status(400).json({
+          success: false,
+          message: "One or more order items are invalid.",
+        });
       }
 
-      return {
-        name,
+      const selectedOptions =
+        item.selectedOptions &&
+        typeof item.selectedOptions === "object" &&
+        !Array.isArray(item.selectedOptions)
+          ? item.selectedOptions
+          : {};
+
+      const variantLabel =
+        typeof item.variantLabel === "string"
+          ? item.variantLabel.slice(0, 1000)
+          : "";
+
+      const optionSummary =
+        typeof item.optionSummary === "string"
+          ? item.optionSummary.slice(0, 1000)
+          : "";
+
+      safeItems.push({
+        productId: item.productId ?? "N/A",
+        name: productName,
         quantity,
         price,
         subtotal: price * quantity,
-      };
-    });
+        selectedOptions,
+        variantLabel,
+        optionSummary,
+      });
+    }
 
+    // Calculate the total on the backend.
     const serverTotal = safeItems.reduce(
       (sum, item) => sum + item.subtotal,
-      0
+      0,
     );
 
-    const formatMoney = (amount) =>
-      `Rs. ${Number(amount).toLocaleString("en-IN", {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      })}`;
-
+    // Format each product with all available customization details.
     const itemsText = safeItems
       .map(
-        (item, index) =>
-          `${index + 1}. ${item.name}\n` +
-          `   Quantity: ${item.quantity}\n` +
-          `   Unit price: ${formatMoney(item.price)}\n` +
-          `   Subtotal: ${formatMoney(item.subtotal)}`
+        (item, index) => `
+${index + 1}. ${item.name}
+===================================
+Product ID: ${item.productId}
+Quantity: ${item.quantity}
+Unit Price: ${formatMoney(item.price)}
+Subtotal: ${formatMoney(item.subtotal)}
+
+SELECTED OPTIONS
+${formatSelectedOptions(item)}
+
+Variant Label: ${item.variantLabel || "Not specified"}
+Option Summary: ${item.optionSummary || "Not specified"}
+`,
       )
-      .join("\n\n");
+      .join("\n");
+
+    const totalQuantity = safeItems.reduce(
+      (sum, item) => sum + item.quantity,
+      0,
+    );
 
     const orderText = `
 NEW ORDER REQUEST - LITTLEWONDERS
 =================================
 
 CUSTOMER DETAILS
-
-Name: ${customer.name.trim()}
+---------------------------------
+Name: ${name}
 Phone: ${phone}
 Email: ${email || "Not provided"}
 
 DELIVERY ADDRESS
-
-${customer.address.trim()}
-${customer.city.trim()} - ${pincode}
+---------------------------------
+${address}
+${city} - ${pincode}
 
 ADDITIONAL INSTRUCTIONS
-
-${typeof customer.notes === "string" && customer.notes.trim()
-  ? customer.notes.trim()
-  : "None"}
+---------------------------------
+${notes || "None"}
 
 ORDER ITEMS
-
+=================================
 ${itemsText}
 
+ORDER SUMMARY
 ---------------------------------
-TOTAL ITEMS: ${safeItems.reduce((sum, item) => sum + item.quantity, 0)}
-ESTIMATED TOTAL: ${formatMoney(serverTotal)}
+Different products: ${safeItems.length}
+Total quantity: ${totalQuantity}
+Estimated total: ${formatMoney(serverTotal)}
 ---------------------------------
 
 This is an order request, not a confirmed order or payment.
-Please contact the customer to confirm availability, delivery
-details, and the final amount.
+Please contact the customer to confirm product availability,
+customization details, delivery information, and the final amount.
 `;
 
     await sendEmail({
-      subject: `New LittleWonders Order Request - ${customer.name.trim()}`,
+      subject: `New LittleWonders Order Request - ${name}`,
       replyTo: email || undefined,
       text: orderText,
     });
@@ -312,14 +429,6 @@ details, and the final amount.
       code: error.code,
     });
 
-    // Invalid cart data is a client error, not an email-server error.
-    if (error.message === "The cart contains invalid item details.") {
-      return res.status(400).json({
-        success: false,
-        message: error.message,
-      });
-    }
-
     return res.status(500).json({
       success: false,
       message: "We couldn't send your order request. Please try again later.",
@@ -327,7 +436,7 @@ details, and the final amount.
   }
 });
 
-// Optional health-check endpoint
+// Health-check endpoint
 app.get("/", (req, res) => {
   res.status(200).send("LittleWonders email API is running.");
 });
