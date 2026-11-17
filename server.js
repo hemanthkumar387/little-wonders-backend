@@ -195,6 +195,58 @@ const contactSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+// ==================== EXPENSE MODEL ====================
+
+const expenseSchema = new mongoose.Schema(
+  {
+    itemName: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 200,
+    },
+    price: {
+      type: Number,
+      required: true,
+      min: 0.01,
+      max: 10000000,
+    },
+    person: {
+      type: String,
+      required: true,
+      enum: ["Hasini", "Pravallika"],
+    },
+  },
+  { timestamps: true },
+);
+
+// Store expenses in the expenses collection.
+const Expense = mongoose.model("Expense", expenseSchema, "expenses");
+
+// ==================== FINANCIAL SETTINGS MODEL ====================
+
+const financialSettingSchema = new mongoose.Schema(
+  {
+    _id: {
+      type: String,
+      default: "financial-summary",
+    },
+    totalReceived: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 1000000000,
+    },
+  },
+  { timestamps: true },
+);
+
+const FinancialSetting = mongoose.model(
+  "FinancialSetting",
+  financialSettingSchema,
+  "financialsettings",
+);
+
 // Explicit MongoDB collection names
 const Order = mongoose.model("Order", orderSchema, "orders");
 
@@ -479,6 +531,163 @@ app.post("/api/checkout", async (req, res) => {
     });
   }
 });
+
+// ==================== ADMIN EXPENSE APIs ====================
+
+// Get all expenses and financial settings
+app.get("/api/admin/expenses", requireAdmin, async (req, res) => {
+  try {
+    const [expenses, settings] = await Promise.all([
+      Expense.find().sort({ createdAt: -1 }).limit(1000).lean(),
+      FinancialSetting.findById("financial-summary").lean(),
+    ]);
+
+    return res.json({
+      success: true,
+      expenses,
+      totalReceived: settings?.totalReceived || 0,
+    });
+  } catch (error) {
+    console.error("Admin expenses error:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to load expenses.",
+    });
+  }
+});
+
+// Add a new expense
+app.post("/api/admin/expenses", requireAdmin, async (req, res) => {
+  try {
+    const { itemName, price, person } = req.body || {};
+
+    const cleanName =
+      typeof itemName === "string" ? itemName.trim() : "";
+
+    const numericPrice = Number(price);
+
+    if (
+      !cleanName ||
+      cleanName.length > 200 ||
+      price === "" ||
+      price === null ||
+      price === undefined ||
+      !Number.isFinite(numericPrice) ||
+      numericPrice <= 0 ||
+      numericPrice > 10000000 ||
+      !["Hasini", "Pravallika"].includes(person)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a valid item name, price and person.",
+      });
+    }
+
+    const expense = await Expense.create({
+      itemName: cleanName,
+      price: numericPrice,
+      person,
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Expense added successfully.",
+      expense,
+    });
+  } catch (error) {
+    console.error("Add expense error:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to add expense.",
+    });
+  }
+});
+
+// Delete an expense
+app.delete("/api/admin/expenses/:id", requireAdmin, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid expense ID.",
+      });
+    }
+
+    const expense = await Expense.findByIdAndDelete(req.params.id);
+
+    if (!expense) {
+      return res.status(404).json({
+        success: false,
+        message: "Expense not found.",
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Expense deleted successfully.",
+    });
+  } catch (error) {
+    console.error("Delete expense error:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to delete expense.",
+    });
+  }
+});
+
+// Update total amount received
+app.patch(
+  "/api/admin/expenses/received",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const { totalReceived } = req.body || {};
+
+      const amount = Number(totalReceived);
+
+      if (
+        totalReceived === "" ||
+        totalReceived === null ||
+        totalReceived === undefined ||
+        !Number.isFinite(amount) ||
+        amount < 0 ||
+        amount > 1000000000
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Please enter a valid received amount.",
+        });
+      }
+
+      const settings = await FinancialSetting.findByIdAndUpdate(
+        "financial-summary",
+        { $set: { totalReceived: amount } },
+        {
+          new: true,
+          upsert: true,
+          runValidators: true,
+          setDefaultsOnInsert: true,
+        },
+      );
+
+      return res.json({
+        success: true,
+        message: "Received amount saved successfully.",
+        totalReceived: settings.totalReceived,
+      });
+    } catch (error) {
+      console.error("Update received amount error:", error.message);
+
+      return res.status(500).json({
+        success: false,
+        message: "Unable to save received amount.",
+      });
+    }
+  },
+);
 
 // ==================== ADMIN AUTHENTICATION ====================
 
