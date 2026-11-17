@@ -562,8 +562,7 @@ app.post("/api/admin/expenses", requireAdmin, async (req, res) => {
   try {
     const { itemName, price, person } = req.body || {};
 
-    const cleanName =
-      typeof itemName === "string" ? itemName.trim() : "";
+    const cleanName = typeof itemName === "string" ? itemName.trim() : "";
 
     const numericPrice = Number(price);
 
@@ -638,56 +637,54 @@ app.delete("/api/admin/expenses/:id", requireAdmin, async (req, res) => {
   }
 });
 
-// Update total amount received
-app.patch(
-  "/api/admin/expenses/received",
-  requireAdmin,
-  async (req, res) => {
-    try {
-      const { totalReceived } = req.body || {};
+// Add amount to total received
+app.patch("/api/admin/expenses/received", requireAdmin, async (req, res) => {
+  try {
+    const { amountToAdd } = req.body || {};
 
-      const amount = Number(totalReceived);
+    const amount = Number(amountToAdd);
 
-      if (
-        totalReceived === "" ||
-        totalReceived === null ||
-        totalReceived === undefined ||
-        !Number.isFinite(amount) ||
-        amount < 0 ||
-        amount > 1000000000
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: "Please enter a valid received amount.",
-        });
-      }
-
-      const settings = await FinancialSetting.findByIdAndUpdate(
-        "financial-summary",
-        { $set: { totalReceived: amount } },
-        {
-          new: true,
-          upsert: true,
-          runValidators: true,
-          setDefaultsOnInsert: true,
-        },
-      );
-
-      return res.json({
-        success: true,
-        message: "Received amount saved successfully.",
-        totalReceived: settings.totalReceived,
-      });
-    } catch (error) {
-      console.error("Update received amount error:", error.message);
-
-      return res.status(500).json({
+    if (
+      amountToAdd === "" ||
+      amountToAdd === null ||
+      amountToAdd === undefined ||
+      !Number.isFinite(amount) ||
+      amount <= 0 ||
+      amount > 1000000000
+    ) {
+      return res.status(400).json({
         success: false,
-        message: "Unable to save received amount.",
+        message: "Please enter a valid amount.",
       });
     }
-  },
-);
+
+    const settings = await FinancialSetting.findByIdAndReplace(
+      "financial-summary",
+      {
+        $inc: { totalReceived: amount },
+      },
+      {
+        new: true,
+        upsert: true,
+        runValidators: true,
+        setDefaultsOnInsert: true,
+      },
+    );
+
+    return res.json({
+      success: true,
+      message: "Amount added successfully.",
+      totalReceived: settings.totalReceived,
+    });
+  } catch (error) {
+    console.error("Add received amount error:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to add received amount.",
+    });
+  }
+});
 
 // ==================== ADMIN AUTHENTICATION ====================
 
