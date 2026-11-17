@@ -14,6 +14,7 @@ const app = express();
 const allowedOrigins = [
   "https://little-wonders-seven.vercel.app",
   "https://www.littlewonders04.shop",
+  "https://admin.littlewonders04.shop/",
   ...(process.env.CLIENT_ORIGIN
     ? process.env.CLIENT_ORIGIN.split(",").map((origin) => origin.trim())
     : []),
