@@ -257,6 +257,41 @@ const ContactMessage = mongoose.model(
   "contacts",
 );
 
+// ==================== CUSTOMER MODEL ====================
+
+const customerSchema = new mongoose.Schema(
+  {
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 100,
+    },
+    email: {
+      type: String,
+      required: true,
+      unique: true,
+      lowercase: true,
+      trim: true,
+      maxlength: 254,
+    },
+    phone: {
+      type: String,
+      required: true,
+      trim: true,
+      match: /^[6-9]\d{9}$/,
+    },
+    password: {
+      type: String,
+      required: true,
+      select: false,
+    },
+  },
+  { timestamps: true },
+);
+
+const Customer = mongoose.model("Customer", customerSchema, "customers");
+
 // ==================== VALIDATION HELPERS ====================
 
 function validEmail(email) {
@@ -272,6 +307,39 @@ function validContact(value) {
   const isIndianMobile = /^[6-9][0-9]{9}$/.test(contact);
 
   return isEmail || isIndianMobile;
+}
+
+// ==================== CUSTOMER AUTHENTICATION ====================
+
+function requireCustomer(req, res, next) {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+
+  if (!token) {
+    return res.status(401).json({
+      success: false,
+      message: "Please log in to continue.",
+    });
+  }
+
+  try {
+    const payload = jwt.verify(token, process.env.CUSTOMER_JWT_SECRET);
+
+    if (payload.role !== "customer") {
+      return res.status(403).json({
+        success: false,
+        message: "Customer access required.",
+      });
+    }
+
+    req.customerId = payload.customerId;
+    next();
+  } catch {
+    return res.status(401).json({
+      success: false,
+      message: "Your session has expired. Please log in again.",
+    });
+  }
 }
 
 // ==================== CONTACT API ====================
@@ -359,18 +427,219 @@ app.post("/api/contact", async (req, res) => {
   }
 });
 
+// ==================== CUSTOMER SIGNUP ====================
+
+app.post("/api/customer/signup", async (req, res) => {
+  try {
+    const { name, email, phone, password } = req.body || {};
+
+    const cleanName = typeof name === "string" ? name.trim() : "";
+
+    const cleanEmail =
+      typeof email === "string" ? email.trim().toLowerCase() : "";
+
+    const cleanPhone = typeof phone === "string" ? phone.trim() : "";
+
+    if (
+      !cleanName ||
+      !cleanEmail ||
+      !cleanPhone ||
+      typeof password !== "string"
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Please complete all required fields.",
+      });
+    }
+
+    if (cleanName.length > 100 || !validEmail(cleanEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: "Please enter valid name and email details.",
+      });
+    }
+
+    if (!/^[6-9]\d{9}$/.test(cleanPhone)) {
+      return res.status(400).json({
+        success: false,
+        message: "Please enter a valid 10-digit mobile number.",
+      });
+    }
+
+    if (password.length < 8 || password.length > 72) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must contain 8–72 characters.",
+      });
+    }
+
+    const existingCustomer = await Customer.findOne({
+      email: cleanEmail,
+    });
+
+    if (existingCustomer) {
+      return res.status(409).json({
+        success: false,
+        message: "An account already exists with this email. Please log in.",
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 12);
+
+    const customer = await Customer.create({
+      name: cleanName,
+      email: cleanEmail,
+      phone: cleanPhone,
+      password: hashedPassword,
+    });
+
+    const token = jwt.sign(
+      {
+        customerId: customer._id.toString(),
+        role: "customer",
+      },
+      process.env.CUSTOMER_JWT_SECRET,
+      { expiresIn: "7d" },
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: "Your LittleWonders account has been created!",
+      token,
+      customer: {
+        id: customer._id,
+        name: customer.name,
+        email: customer.email,
+        phone: customer.phone,
+      },
+    });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message: "An account already exists with this email.",
+      });
+    }
+
+    console.error("Customer signup error:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to create your account. Please try again.",
+    });
+  }
+});
+
+// ==================== CUSTOMER LOGIN ====================
+
+app.post("/api/customer/login", async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+
+    const cleanEmail =
+      typeof email === "string" ? email.trim().toLowerCase() : "";
+
+    if (!cleanEmail || typeof password !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "Please enter your email and password.",
+      });
+    }
+
+    const customer = await Customer.findOne({
+      email: cleanEmail,
+    }).select("+password");
+
+    if (!customer || !(await bcrypt.compare(password, customer.password))) {
+      return res.status(401).json({
+        success: false,
+        message: "Incorrect email or password.",
+      });
+    }
+
+    const token = jwt.sign(
+      {
+        customerId: customer._id.toString(),
+        role: "customer",
+      },
+      process.env.CUSTOMER_JWT_SECRET,
+      { expiresIn: "7d" },
+    );
+
+    return res.json({
+      success: true,
+      message: "Login successful.",
+      token,
+      customer: {
+        id: customer._id,
+        name: customer.name,
+        email: customer.email,
+        phone: customer.phone,
+      },
+    });
+  } catch (error) {
+    console.error("Customer login error:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to log in. Please try again.",
+    });
+  }
+});
+
+// ==================== GET LOGGED-IN CUSTOMER ====================
+
+app.get("/api/customer/me", requireCustomer, async (req, res) => {
+  try {
+    const customer = await Customer.findById(req.customerId).lean();
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer account not found.",
+      });
+    }
+
+    return res.json({
+      success: true,
+      customer: {
+        id: customer._id,
+        name: customer.name,
+        email: customer.email,
+        phone: customer.phone,
+      },
+    });
+  } catch (error) {
+    console.error("Customer profile error:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to load your account.",
+    });
+  }
+});
+
 // ==================== CHECKOUT API ====================
 
-app.post("/api/checkout", async (req, res) => {
+// ==================== CHECKOUT API ====================
+
+app.post("/api/checkout", requireCustomer, async (req, res) => {
   try {
     const { customer, items } = req.body || {};
 
+    // 1. Verify the logged-in customer
+    const loggedInCustomer = await Customer.findById(req.customerId);
+
+    if (!loggedInCustomer) {
+      return res.status(401).json({
+        success: false,
+        message: "Customer account not found. Please log in again.",
+      });
+    }
+
+    // 2. Validate delivery details
     if (
       !customer ||
-      typeof customer.name !== "string" ||
-      !customer.name.trim() ||
-      typeof customer.phone !== "string" ||
-      !customer.phone.trim() ||
       typeof customer.address !== "string" ||
       !customer.address.trim() ||
       typeof customer.city !== "string" ||
@@ -380,39 +649,28 @@ app.post("/api/checkout", async (req, res) => {
     ) {
       return res.status(400).json({
         success: false,
-        message: "Please provide all required customer details.",
+        message: "Please provide your complete delivery address.",
       });
     }
 
-    const name = customer.name.trim();
-    const phone = customer.phone.trim();
     const address = customer.address.trim();
     const city = customer.city.trim();
     const pincode = customer.pincode.trim();
 
     const notes =
-      typeof customer.notes === "string" ? customer.notes.trim() : "";
-
-    const email =
-      typeof customer.email === "string" ? customer.email.trim() : "";
+      typeof customer.notes === "string"
+        ? customer.notes.trim()
+        : "";
 
     if (
-      name.length > 100 ||
       address.length > 500 ||
       city.length > 100 ||
-      pincode.length > 6 ||
+      pincode.length !== 6 ||
       notes.length > 500
     ) {
       return res.status(400).json({
         success: false,
-        message: "Some customer details are too long.",
-      });
-    }
-
-    if (!/^[0-9]{10}$/.test(phone)) {
-      return res.status(400).json({
-        success: false,
-        message: "Please provide a valid 10-digit phone number.",
+        message: "Some delivery details are invalid or too long.",
       });
     }
 
@@ -423,14 +681,12 @@ app.post("/api/checkout", async (req, res) => {
       });
     }
 
-    if (email && (email.length > 254 || !validEmail(email))) {
-      return res.status(400).json({
-        success: false,
-        message: "Please provide a valid email address.",
-      });
-    }
-
-    if (!Array.isArray(items) || items.length === 0 || items.length > 100) {
+    // 3. Validate cart items
+    if (
+      !Array.isArray(items) ||
+      items.length === 0 ||
+      items.length > 100
+    ) {
       return res.status(400).json({
         success: false,
         message: "Your cart has no valid items.",
@@ -440,7 +696,7 @@ app.post("/api/checkout", async (req, res) => {
     const safeItems = [];
 
     for (const item of items) {
-      if (!item || typeof item !== "object") {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
         return res.status(400).json({
           success: false,
           message: "One or more order items are invalid.",
@@ -450,7 +706,10 @@ app.post("/api/checkout", async (req, res) => {
       const quantity = Number(item.quantity);
       const price = Number(item.price);
 
-      const productName = typeof item.name === "string" ? item.name.trim() : "";
+      const productName =
+        typeof item.name === "string"
+          ? item.name.trim()
+          : "";
 
       if (
         !productName ||
@@ -477,9 +736,13 @@ app.post("/api/checkout", async (req, res) => {
 
       safeItems.push({
         productId: item.productId ?? "N/A",
+
         name: productName,
+
         quantity,
+
         price,
+
         subtotal: price * quantity,
 
         variantKey:
@@ -501,22 +764,39 @@ app.post("/api/checkout", async (req, res) => {
       });
     }
 
-    const total = safeItems.reduce((sum, item) => sum + item.subtotal, 0);
+    // 4. Calculate order total on the backend
+    const total = safeItems.reduce(
+      (sum, item) => sum + item.subtotal,
+      0,
+    );
 
+    if (!Number.isFinite(total) || total > 1000000000) {
+      return res.status(400).json({
+        success: false,
+        message: "The order total is invalid.",
+      });
+    }
+
+    // 5. Save the order using authenticated customer details
     const savedOrder = await Order.create({
       customer: {
-        name,
-        phone,
-        email,
+        name: loggedInCustomer.name,
+        phone: loggedInCustomer.phone,
+        email: loggedInCustomer.email,
         address,
         city,
         pincode,
         notes,
       },
+
       items: safeItems,
+
       total,
+
+      status: "Pending",
     });
 
+    // 6. Send success response
     return res.status(201).json({
       success: true,
       message:
@@ -528,7 +808,8 @@ app.post("/api/checkout", async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: "We couldn't save your order request. Please try again later.",
+      message:
+        "We couldn't save your order request. Please try again later.",
     });
   }
 });
