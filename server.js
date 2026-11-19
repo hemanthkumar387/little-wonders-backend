@@ -276,11 +276,11 @@ const customerSchema = new mongoose.Schema(
     },
     email: {
       type: String,
-      required: true,
       unique: true,
       lowercase: true,
       trim: true,
       maxlength: 254,
+      default: "",
     },
     phone: {
       type: String,
@@ -541,51 +541,61 @@ app.post("/api/customer/signup", async (req, res) => {
 
 app.post("/api/customer/login", async (req, res) => {
   try {
-    const { email, password } = req.body || {};
+    const { identifier, password } = req.body;
 
-    const cleanEmail =
-      typeof email === "string" ? email.trim().toLowerCase() : "";
-
-    if (!cleanEmail || typeof password !== "string") {
+    if (!identifier || !password) {
       return res.status(400).json({
         success: false,
-        message: "Please enter your email and password.",
+        message: "Please enter your email/mobile number and password.",
       });
     }
 
-    const customer = await Customer.findOne({
-      email: cleanEmail,
-    }).select("+password");
+    const normalizedIdentifier = identifier.trim().toLowerCase();
 
-    if (!customer || !(await bcrypt.compare(password, customer.password))) {
+    const isPhone = /^[6-9]\d{9}$/.test(normalizedIdentifier);
+
+    const customer = await Customer.findOne(
+      isPhone
+        ? { phone: normalizedIdentifier }
+        : { email: normalizedIdentifier },
+    ).select("+password");
+
+    if (!customer) {
       return res.status(401).json({
         success: false,
-        message: "Incorrect email or password.",
+        message: "Invalid email/mobile number or password.",
+      });
+    }
+
+    const isPasswordValid = await bcrypt.compare(password, customer.password);
+
+    if (!isPasswordValid) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid email/mobile number or password.",
       });
     }
 
     const token = jwt.sign(
       {
-        customerId: customer._id.toString(),
+        id: customer._id,
         role: "customer",
       },
       process.env.CUSTOMER_JWT_SECRET,
       { expiresIn: "7d" },
     );
 
-    return res.json({
+    const customerData = customer.toObject();
+    delete customerData.password;
+
+    return res.status(200).json({
       success: true,
       message: "Login successful.",
       token,
-      customer: {
-        id: customer._id,
-        name: customer.name,
-        email: customer.email,
-        phone: customer.phone,
-      },
+      customer: customerData,
     });
   } catch (error) {
-    console.error("Customer login error:", error.message);
+    console.error("Customer login error:", error);
 
     return res.status(500).json({
       success: false,
