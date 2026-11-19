@@ -91,6 +91,13 @@ const orderItemSchema = new mongoose.Schema(
 
 const orderSchema = new mongoose.Schema(
   {
+    customerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Customer",
+      required: true,
+      index: true,
+    },
+
     customer: {
       name: {
         type: String,
@@ -619,6 +626,31 @@ app.get("/api/customer/me", requireCustomer, async (req, res) => {
   }
 });
 
+// ==================== GET LOGGED-IN CUSTOMER ORDERS ====================
+
+app.get("/api/customer/orders", requireCustomer, async (req, res) => {
+  try {
+    const orders = await Order.find({
+      customerId: req.customerId,
+    })
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      orders,
+    });
+  } catch (error) {
+    console.error("Customer orders error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to load your orders.",
+    });
+  }
+});
+
 // ==================== CHECKOUT API ====================
 
 // ==================== CHECKOUT API ====================
@@ -658,9 +690,7 @@ app.post("/api/checkout", requireCustomer, async (req, res) => {
     const pincode = customer.pincode.trim();
 
     const notes =
-      typeof customer.notes === "string"
-        ? customer.notes.trim()
-        : "";
+      typeof customer.notes === "string" ? customer.notes.trim() : "";
 
     if (
       address.length > 500 ||
@@ -682,11 +712,7 @@ app.post("/api/checkout", requireCustomer, async (req, res) => {
     }
 
     // 3. Validate cart items
-    if (
-      !Array.isArray(items) ||
-      items.length === 0 ||
-      items.length > 100
-    ) {
+    if (!Array.isArray(items) || items.length === 0 || items.length > 100) {
       return res.status(400).json({
         success: false,
         message: "Your cart has no valid items.",
@@ -706,10 +732,7 @@ app.post("/api/checkout", requireCustomer, async (req, res) => {
       const quantity = Number(item.quantity);
       const price = Number(item.price);
 
-      const productName =
-        typeof item.name === "string"
-          ? item.name.trim()
-          : "";
+      const productName = typeof item.name === "string" ? item.name.trim() : "";
 
       if (
         !productName ||
@@ -765,10 +788,7 @@ app.post("/api/checkout", requireCustomer, async (req, res) => {
     }
 
     // 4. Calculate order total on the backend
-    const total = safeItems.reduce(
-      (sum, item) => sum + item.subtotal,
-      0,
-    );
+    const total = safeItems.reduce((sum, item) => sum + item.subtotal, 0);
 
     if (!Number.isFinite(total) || total > 1000000000) {
       return res.status(400).json({
@@ -779,6 +799,8 @@ app.post("/api/checkout", requireCustomer, async (req, res) => {
 
     // 5. Save the order using authenticated customer details
     const savedOrder = await Order.create({
+      customerId: loggedInCustomer._id,
+
       customer: {
         name: loggedInCustomer.name,
         phone: loggedInCustomer.phone,
@@ -808,8 +830,7 @@ app.post("/api/checkout", requireCustomer, async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message:
-        "We couldn't save your order request. Please try again later.",
+      message: "We couldn't save your order request. Please try again later.",
     });
   }
 });
