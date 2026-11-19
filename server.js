@@ -280,7 +280,7 @@ const customerSchema = new mongoose.Schema(
       lowercase: true,
       trim: true,
       maxlength: 254,
-      default: "",
+      default: undefined,
     },
     phone: {
       type: String,
@@ -318,6 +318,8 @@ function validContact(value) {
 
 // ==================== CUSTOMER AUTHENTICATION ====================
 
+// ==================== CUSTOMER AUTHENTICATION ====================
+
 function requireCustomer(req, res, next) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";
@@ -332,16 +334,21 @@ function requireCustomer(req, res, next) {
   try {
     const payload = jwt.verify(token, process.env.CUSTOMER_JWT_SECRET);
 
-    if (payload.role !== "customer") {
-      return res.status(403).json({
+    if (
+      payload.role !== "customer" ||
+      !payload.customerId ||
+      !mongoose.isValidObjectId(payload.customerId)
+    ) {
+      return res.status(401).json({
         success: false,
-        message: "Customer access required.",
+        message: "Invalid customer session. Please log in again.",
       });
     }
 
     req.customerId = payload.customerId;
+
     next();
-  } catch {
+  } catch (error) {
     return res.status(401).json({
       success: false,
       message: "Your session has expired. Please log in again.",
@@ -436,6 +443,8 @@ app.post("/api/contact", async (req, res) => {
 
 // ==================== CUSTOMER SIGNUP ====================
 
+// ==================== CUSTOMER SIGNUP ====================
+
 app.post("/api/customer/signup", async (req, res) => {
   try {
     const { name, email, phone, password } = req.body || {};
@@ -447,59 +456,89 @@ app.post("/api/customer/signup", async (req, res) => {
 
     const cleanPhone = typeof phone === "string" ? phone.trim() : "";
 
-    if (
-      !cleanName ||
-      !cleanEmail ||
-      !cleanPhone ||
-      typeof password !== "string"
-    ) {
+    if (!cleanName || !cleanPhone || !password) {
       return res.status(400).json({
         success: false,
         message: "Please complete all required fields.",
       });
     }
 
-    if (cleanName.length > 100 || !validEmail(cleanEmail)) {
+    if (cleanName.length > 100) {
       return res.status(400).json({
         success: false,
-        message: "Please enter valid name and email details.",
+        message: "Your name must not exceed 100 characters.",
+      });
+    }
+
+    if (cleanEmail && !validEmail(cleanEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: "Please enter a valid email address.",
+      });
+    }
+
+    if (cleanEmail.length > 254) {
+      return res.status(400).json({
+        success: false,
+        message: "Email address is too long.",
       });
     }
 
     if (!/^[6-9]\d{9}$/.test(cleanPhone)) {
       return res.status(400).json({
         success: false,
-        message: "Please enter a valid 10-digit mobile number.",
+        message: "Please enter a valid 10-digit Indian mobile number.",
       });
     }
 
-    if (password.length < 8 || password.length > 72) {
+    if (
+      typeof password !== "string" ||
+      password.length < 8 ||
+      password.length > 72
+    ) {
       return res.status(400).json({
         success: false,
         message: "Password must contain 8–72 characters.",
       });
     }
 
-    const existingCustomer = await Customer.findOne({
-      email: cleanEmail,
+    // Check whether the phone number is already registered.
+    const existingPhone = await Customer.findOne({
+      phone: cleanPhone,
     });
 
-    if (existingCustomer) {
+    if (existingPhone) {
       return res.status(409).json({
         success: false,
-        message: "An account already exists with this email. Please log in.",
+        message:
+          "An account already exists with this mobile number. Please log in.",
       });
+    }
+
+    // Check email only when supplied.
+    if (cleanEmail) {
+      const existingEmail = await Customer.findOne({
+        email: cleanEmail,
+      });
+
+      if (existingEmail) {
+        return res.status(409).json({
+          success: false,
+          message: "An account already exists with this email. Please log in.",
+        });
+      }
     }
 
     const hashedPassword = await bcrypt.hash(password, 12);
 
     const customer = await Customer.create({
       name: cleanName,
-      email: cleanEmail,
+      email: cleanEmail || undefined,
       phone: cleanPhone,
       password: hashedPassword,
     });
 
+    // Use customerId consistently.
     const token = jwt.sign(
       {
         customerId: customer._id.toString(),
@@ -516,7 +555,7 @@ app.post("/api/customer/signup", async (req, res) => {
       customer: {
         id: customer._id,
         name: customer.name,
-        email: customer.email,
+        email: customer.email || "",
         phone: customer.phone,
       },
     });
@@ -524,11 +563,11 @@ app.post("/api/customer/signup", async (req, res) => {
     if (error.code === 11000) {
       return res.status(409).json({
         success: false,
-        message: "An account already exists with this email.",
+        message: "An account already exists with these details. Please log in.",
       });
     }
 
-    console.error("Customer signup error:", error.message);
+    console.error("Customer signup error:", error);
 
     return res.status(500).json({
       success: false,
@@ -539,11 +578,18 @@ app.post("/api/customer/signup", async (req, res) => {
 
 // ==================== CUSTOMER LOGIN ====================
 
+// ==================== CUSTOMER LOGIN ====================
+
 app.post("/api/customer/login", async (req, res) => {
   try {
-    const { identifier, password } = req.body;
+    const { identifier, password } = req.body || {};
 
-    if (!identifier || !password) {
+    if (
+      typeof identifier !== "string" ||
+      !identifier.trim() ||
+      typeof password !== "string" ||
+      !password
+    ) {
       return res.status(400).json({
         success: false,
         message: "Please enter your email/mobile number and password.",
@@ -576,9 +622,10 @@ app.post("/api/customer/login", async (req, res) => {
       });
     }
 
+    // Use customerId, matching signup and requireCustomer.
     const token = jwt.sign(
       {
-        id: customer._id,
+        customerId: customer._id.toString(),
         role: "customer",
       },
       process.env.CUSTOMER_JWT_SECRET,
@@ -592,7 +639,12 @@ app.post("/api/customer/login", async (req, res) => {
       success: true,
       message: "Login successful.",
       token,
-      customer: customerData,
+      customer: {
+        id: customerData._id,
+        name: customerData.name,
+        email: customerData.email || "",
+        phone: customerData.phone,
+      },
     });
   } catch (error) {
     console.error("Customer login error:", error);
