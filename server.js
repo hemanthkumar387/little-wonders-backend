@@ -203,6 +203,54 @@ const contactSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+
+
+// ==================== REVIEW MODEL ====================
+
+const reviewSchema = new mongoose.Schema(
+  {
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 100,
+    },
+    product: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 100,
+    },
+    rating: {
+      type: Number,
+      required: true,
+      min: 1,
+      max: 5,
+      validate: {
+        validator: Number.isInteger,
+        message: "Rating must be a whole number.",
+      },
+    },
+    message: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: 10,
+      maxlength: 1000,
+    },
+    status: {
+      type: String,
+      enum: ["Pending", "Approved", "Rejected"],
+      default: "Pending",
+      index: true,
+    },
+  },
+  { timestamps: true },
+);
+
+const Review = mongoose.model("Review", reviewSchema, "reviews");
+
+
 // ==================== EXPENSE MODEL ====================
 
 const expenseSchema = new mongoose.Schema(
@@ -437,6 +485,123 @@ app.post("/api/contact", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Unable to save your message right now. Please try again later.",
+    });
+  }
+});
+
+
+// ==================== PUBLIC REVIEW APIs ====================
+
+// Get approved customer reviews
+app.get("/api/reviews", async (req, res) => {
+  try {
+    const reviews = await Review.find({
+      status: "Approved",
+    })
+      .sort({ createdAt: -1 })
+      .limit(200)
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      reviews: reviews.map((review) => ({
+        id: review._id,
+        name: review.name,
+        product: review.product,
+        rating: review.rating,
+        message: review.message,
+        date: review.createdAt,
+        status: review.status,
+      })),
+    });
+  } catch (error) {
+    console.error("Fetch reviews error:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to load customer reviews.",
+    });
+  }
+});
+
+// Submit a customer review
+app.post("/api/reviews", async (req, res) => {
+  try {
+    const { name, product, rating, message } = req.body || {};
+
+    const cleanName = typeof name === "string" ? name.trim() : "";
+    const cleanProduct =
+      typeof product === "string" ? product.trim() : "";
+    const cleanMessage =
+      typeof message === "string" ? message.trim() : "";
+    const numericRating = Number(rating);
+
+    if (!cleanName || !cleanProduct || !cleanMessage || rating === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: "Please complete all required review fields.",
+      });
+    }
+
+    if (cleanName.length > 100) {
+      return res.status(400).json({
+        success: false,
+        message: "Name must not exceed 100 characters.",
+      });
+    }
+
+    if (cleanProduct.length > 100) {
+      return res.status(400).json({
+        success: false,
+        message: "Product name must not exceed 100 characters.",
+      });
+    }
+
+    if (
+      !Number.isInteger(numericRating) ||
+      numericRating < 1 ||
+      numericRating > 5
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Please select a valid rating between 1 and 5.",
+      });
+    }
+
+    if (cleanMessage.length < 10 || cleanMessage.length > 1000) {
+      return res.status(400).json({
+        success: false,
+        message: "Review must contain between 10 and 1000 characters.",
+      });
+    }
+
+    const review = await Review.create({
+      name: cleanName,
+      product: cleanProduct,
+      rating: numericRating,
+      message: cleanMessage,
+      status: "Pending",
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Thank you! Your review has been submitted for approval.",
+      review: {
+        id: review._id,
+        name: review.name,
+        product: review.product,
+        rating: review.rating,
+        message: review.message,
+        date: review.createdAt,
+        status: review.status,
+      },
+    });
+  } catch (error) {
+    console.error("Submit review error:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to submit your review. Please try again later.",
     });
   }
 });
@@ -1050,6 +1215,117 @@ app.patch("/api/admin/expenses/received", requireAdmin, async (req, res) => {
     });
   }
 });
+
+
+// ==================== ADMIN REVIEW APIs ====================
+
+// Get all customer reviews for admin
+app.get("/api/admin/reviews", requireAdmin, async (req, res) => {
+  try {
+    const reviews = await Review.find()
+      .sort({ createdAt: -1 })
+      .limit(500)
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      reviews,
+    });
+  } catch (error) {
+    console.error("Admin reviews error:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to load reviews.",
+    });
+  }
+});
+
+// Approve or reject a customer review
+app.patch("/api/admin/reviews/:id/status", requireAdmin, async (req, res) => {
+  try {
+    const { status } = req.body || {};
+
+    const allowedStatuses = ["Pending", "Approved", "Rejected"];
+
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid review status.",
+      });
+    }
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid review ID.",
+      });
+    }
+
+    const review = await Review.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      {
+        new: true,
+        runValidators: true,
+      },
+    );
+
+    if (!review) {
+      return res.status(404).json({
+        success: false,
+        message: "Review not found.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Review ${status.toLowerCase()} successfully.`,
+      review,
+    });
+  } catch (error) {
+    console.error("Update review status error:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to update review status.",
+    });
+  }
+});
+
+// Delete a customer review
+app.delete("/api/admin/reviews/:id", requireAdmin, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid review ID.",
+      });
+    }
+
+    const review = await Review.findByIdAndDelete(req.params.id);
+
+    if (!review) {
+      return res.status(404).json({
+        success: false,
+        message: "Review not found.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Review deleted successfully.",
+    });
+  } catch (error) {
+    console.error("Delete review error:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to delete review.",
+    });
+  }
+});
+
 
 // ==================== ADMIN AUTHENTICATION ====================
 
