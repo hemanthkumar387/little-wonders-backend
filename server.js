@@ -16,7 +16,9 @@ const allowedOrigins = [
   "https://www.littlewonders04.shop",
   "https://admin.littlewonders04.shop/",
   ...(process.env.CLIENT_ORIGIN
-    ? process.env.CLIENT_ORIGIN.split(",").map((origin) => origin.trim())
+    ? process.env.CLIENT_ORIGIN.split(",").map((origin) =>
+        origin.trim().replace(/\/$/, ""),
+      )
     : []),
 ];
 
@@ -151,6 +153,16 @@ const orderSchema = new mongoose.Schema(
       required: true,
       min: 0,
     },
+    paymentStatus: {
+      type: String,
+      enum: ["Unpaid", "Partially Paid", "Paid"],
+      default: "Unpaid",
+    },
+    amountPaid: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     status: {
       type: String,
       enum: ["Pending", "Confirmed", "Completed", "Cancelled"],
@@ -203,8 +215,6 @@ const contactSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-
-
 // ==================== REVIEW MODEL ====================
 
 const reviewSchema = new mongoose.Schema(
@@ -249,7 +259,6 @@ const reviewSchema = new mongoose.Schema(
 );
 
 const Review = mongoose.model("Review", reviewSchema, "reviews");
-
 
 // ==================== EXPENSE MODEL ====================
 
@@ -489,7 +498,6 @@ app.post("/api/contact", async (req, res) => {
   }
 });
 
-
 // ==================== PUBLIC REVIEW APIs ====================
 
 // Get approved customer reviews
@@ -530,10 +538,8 @@ app.post("/api/reviews", async (req, res) => {
     const { name, product, rating, message } = req.body || {};
 
     const cleanName = typeof name === "string" ? name.trim() : "";
-    const cleanProduct =
-      typeof product === "string" ? product.trim() : "";
-    const cleanMessage =
-      typeof message === "string" ? message.trim() : "";
+    const cleanProduct = typeof product === "string" ? product.trim() : "";
+    const cleanMessage = typeof message === "string" ? message.trim() : "";
     const numericRating = Number(rating);
 
     if (!cleanName || !cleanProduct || !cleanMessage || rating === undefined) {
@@ -1041,6 +1047,8 @@ app.post("/api/checkout", requireCustomer, async (req, res) => {
       items: safeItems,
 
       total,
+      paymentStatus: "Unpaid",
+      amountPaid: 0,
 
       status: "Pending",
     });
@@ -1167,6 +1175,85 @@ app.delete("/api/admin/expenses/:id", requireAdmin, async (req, res) => {
   }
 });
 
+// Update order payment details
+app.patch("/api/admin/orders/:id/payment", requireAdmin, async (req, res) => {
+  try {
+    const { amountPaid } = req.body || {};
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid order ID.",
+      });
+    }
+
+    if (
+      amountPaid === "" ||
+      amountPaid === null ||
+      amountPaid === undefined ||
+      !Number.isFinite(Number(amountPaid))
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Please enter a valid amount received.",
+      });
+    }
+
+    const numericAmount = Number(Number(amountPaid).toFixed(2));
+
+    if (numericAmount < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Amount received cannot be negative.",
+      });
+    }
+
+    const order = await Order.findById(req.params.id);
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found.",
+      });
+    }
+
+    const orderTotal = Number(order.total) || 0;
+
+    if (numericAmount > orderTotal) {
+      return res.status(400).json({
+        success: false,
+        message: "Amount received cannot exceed the order total.",
+      });
+    }
+
+    let paymentStatus = "Unpaid";
+
+    if (numericAmount >= orderTotal && orderTotal > 0) {
+      paymentStatus = "Paid";
+    } else if (numericAmount > 0) {
+      paymentStatus = "Partially Paid";
+    }
+
+    order.amountPaid = numericAmount;
+    order.paymentStatus = paymentStatus;
+
+    await order.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Payment details updated successfully.",
+      order,
+    });
+  } catch (error) {
+    console.error("Update payment error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to update payment details.",
+    });
+  }
+});
+
 // Add amount to total received
 app.patch("/api/admin/expenses/received", requireAdmin, async (req, res) => {
   try {
@@ -1215,7 +1302,6 @@ app.patch("/api/admin/expenses/received", requireAdmin, async (req, res) => {
     });
   }
 });
-
 
 // ==================== ADMIN REVIEW APIs ====================
 
@@ -1325,7 +1411,6 @@ app.delete("/api/admin/reviews/:id", requireAdmin, async (req, res) => {
     });
   }
 });
-
 
 // ==================== ADMIN AUTHENTICATION ====================
 
