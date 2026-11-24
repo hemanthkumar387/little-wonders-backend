@@ -12,17 +12,56 @@ const app = express();
 
 // ==================== CORS CONFIGURATION ====================
 
-const normalizeOrigin = (origin) => origin.trim().replace(/\/$/, "");
+const normalizeOrigin = (origin = "") =>
+  origin.trim().replace(/\/+$/, "");
 
 const allowedOrigins = [
   "https://little-wonders-seven.vercel.app",
   "https://www.littlewonders04.shop",
   "https://littlewonders04.shop",
   "https://admin.littlewonders04.shop",
+  "http://localhost:5173",
   ...(process.env.CLIENT_ORIGIN
     ? process.env.CLIENT_ORIGIN.split(",").map(normalizeOrigin)
     : []),
 ];
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    const normalizedOrigin = normalizeOrigin(origin);
+
+    if (allowedOrigins.includes(normalizedOrigin)) {
+      return callback(null, normalizedOrigin);
+    }
+
+    console.error("CORS rejected origin:", origin);
+
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
+
+  credentials: true,
+
+  methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+  ],
+
+  optionsSuccessStatus: 204,
+};
+
+// Register CORS once, before all routes and middleware.
+// This middleware also handles OPTIONS preflight requests.
+app.use(cors(corsOptions));
+
+app.use(express.json({ limit: "100kb" }));
+app.use(cookieParser());
 
 app.use(
   cors({
@@ -38,10 +77,6 @@ app.use(
     allowedHeaders: ["Content-Type", "X-Requested-With"],
   }),
 );
-
-app.use(express.json({ limit: "100kb" }));
-app.use(cookieParser());
-
 // ==================== REQUEST ORIGIN PROTECTION ====================
 
 // Protect browser requests that can change server data.
