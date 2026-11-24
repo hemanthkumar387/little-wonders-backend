@@ -1,6 +1,7 @@
 const express = require("express");
 const dotenv = require("dotenv");
 const cors = require("cors");
+const cookieParser = require("cookie-parser");
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -11,32 +12,79 @@ const app = express();
 
 // ==================== CORS CONFIGURATION ====================
 
+const normalizeOrigin = (origin) => origin.trim().replace(/\/$/, "");
+
 const allowedOrigins = [
   "https://little-wonders-seven.vercel.app",
   "https://www.littlewonders04.shop",
-  "https://admin.littlewonders04.shop/",
+  "https://littlewonders04.shop",
+  "https://admin.littlewonders04.shop",
   ...(process.env.CLIENT_ORIGIN
-    ? process.env.CLIENT_ORIGIN.split(",").map((origin) =>
-        origin.trim().replace(/\/$/, ""),
-      )
+    ? process.env.CLIENT_ORIGIN.split(",").map(normalizeOrigin)
     : []),
 ];
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
+      if (!origin || allowedOrigins.includes(normalizeOrigin(origin))) {
         return callback(null, true);
       }
 
       return callback(new Error(`CORS blocked for origin: ${origin}`));
     },
+    credentials: true,
     methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type", "X-Requested-With"],
   }),
 );
 
 app.use(express.json({ limit: "100kb" }));
+app.use(cookieParser());
+
+// ==================== REQUEST ORIGIN PROTECTION ====================
+
+// Protect browser requests that can change server data.
+// Requests from unapproved browser origins are rejected.
+app.use((req, res, next) => {
+  const safeMethods = ["GET", "HEAD", "OPTIONS"];
+
+  if (safeMethods.includes(req.method)) {
+    return next();
+  }
+
+  const origin = req.get("Origin");
+
+  if (origin && !allowedOrigins.includes(normalizeOrigin(origin))) {
+    return res.status(403).json({
+      success: false,
+      message: "Request origin is not allowed.",
+    });
+  }
+
+  next();
+});
+
+// ==================== COOKIE CONFIGURATION ====================
+
+// Keep SameSite=None while the frontend and backend are hosted
+// on different sites, such as Vercel and Render domains.
+const COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: true,
+  sameSite: "none",
+  path: "/",
+};
+
+const CUSTOMER_COOKIE_OPTIONS = {
+  ...COOKIE_OPTIONS,
+  maxAge: 7 * 24 * 60 * 60 * 1000,
+};
+
+const ADMIN_COOKIE_OPTIONS = {
+  ...COOKIE_OPTIONS,
+  maxAge: 8 * 60 * 60 * 1000,
+};
 
 // ==================== ORDER MODEL ====================
 
@@ -99,7 +147,6 @@ const orderSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
-
     customer: {
       name: {
         type: String,
@@ -285,7 +332,6 @@ const expenseSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-// Store expenses in the expenses collection.
 const Expense = mongoose.model("Expense", expenseSchema, "expenses");
 
 // ==================== FINANCIAL SETTINGS MODEL ====================
@@ -312,7 +358,8 @@ const FinancialSetting = mongoose.model(
   "financialsettings",
 );
 
-// Explicit MongoDB collection names
+// ==================== ORDER AND CONTACT MODELS ====================
+
 const Order = mongoose.model("Order", orderSchema, "orders");
 
 const ContactMessage = mongoose.model(
@@ -333,7 +380,6 @@ const customerSchema = new mongoose.Schema(
     },
     email: {
       type: String,
-      unique: true,
       lowercase: true,
       trim: true,
       maxlength: 254,
@@ -354,6 +400,18 @@ const customerSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+// Only enforce email uniqueness when an email string exists.
+// This allows multiple customers to register without an email.
+customerSchema.index(
+  { email: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      email: { $type: "string" },
+    },
+  },
+);
+
 const Customer = mongoose.model("Customer", customerSchema, "customers");
 
 // ==================== VALIDATION HELPERS ====================
@@ -362,24 +420,10 @@ function validEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-function validContact(value) {
-  const contact = value.trim();
-
-  const isEmail = validEmail(contact);
-
-  // Indian mobile number: 10 digits starting with 6, 7, 8, or 9.
-  const isIndianMobile = /^[6-9][0-9]{9}$/.test(contact);
-
-  return isEmail || isIndianMobile;
-}
-
-// ==================== CUSTOMER AUTHENTICATION ====================
-
 // ==================== CUSTOMER AUTHENTICATION ====================
 
 function requireCustomer(req, res, next) {
-  const header = req.headers.authorization || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+  const token = req.cookies?.customerToken;
 
   if (!token) {
     return res.status(401).json({
@@ -403,12 +447,43 @@ function requireCustomer(req, res, next) {
     }
 
     req.customerId = payload.customerId;
-
     next();
   } catch (error) {
     return res.status(401).json({
       success: false,
       message: "Your session has expired. Please log in again.",
+    });
+  }
+}
+
+// ==================== ADMIN AUTHENTICATION ====================
+
+function requireAdmin(req, res, next) {
+  const token = req.cookies?.adminToken;
+
+  if (!token) {
+    return res.status(401).json({
+      success: false,
+      message: "Admin login required.",
+    });
+  }
+
+  try {
+    const payload = jwt.verify(token, process.env.ADMIN_JWT_SECRET);
+
+    if (payload.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Admin access required.",
+      });
+    }
+
+    req.admin = payload;
+    next();
+  } catch (error) {
+    return res.status(401).json({
+      success: false,
+      message: "Your admin session expired. Please log in again.",
     });
   }
 }
@@ -441,10 +516,14 @@ app.post("/api/contact", async (req, res) => {
     const cleanSubject = subject.trim();
     const cleanMessage = message.trim();
 
-    if (cleanName.length > 100 || cleanMessage.length > 1500) {
+    if (
+      cleanName.length > 100 ||
+      cleanMessage.length > 1500 ||
+      cleanSubject.length > 200
+    ) {
       return res.status(400).json({
         success: false,
-        message: "Your name or message exceeds the allowed length.",
+        message: "Some fields exceed the allowed length.",
       });
     }
 
@@ -455,22 +534,10 @@ app.post("/api/contact", async (req, res) => {
       });
     }
 
-    // Email is optional, but must be valid if supplied.
-    if (
-      cleanEmail &&
-      (cleanEmail.length > 254 ||
-        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail))
-    ) {
+    if (cleanEmail && (cleanEmail.length > 254 || !validEmail(cleanEmail))) {
       return res.status(400).json({
         success: false,
         message: "Please enter a valid email address or leave it empty.",
-      });
-    }
-
-    if (cleanSubject.length > 200) {
-      return res.status(400).json({
-        success: false,
-        message: "The subject is too long.",
       });
     }
 
@@ -500,7 +567,6 @@ app.post("/api/contact", async (req, res) => {
 
 // ==================== PUBLIC REVIEW APIs ====================
 
-// Get approved customer reviews
 app.get("/api/reviews", async (req, res) => {
   try {
     const reviews = await Review.find({
@@ -532,7 +598,6 @@ app.get("/api/reviews", async (req, res) => {
   }
 });
 
-// Submit a customer review
 app.post("/api/reviews", async (req, res) => {
   try {
     const { name, product, rating, message } = req.body || {};
@@ -549,17 +614,10 @@ app.post("/api/reviews", async (req, res) => {
       });
     }
 
-    if (cleanName.length > 100) {
+    if (cleanName.length > 100 || cleanProduct.length > 100) {
       return res.status(400).json({
         success: false,
-        message: "Name must not exceed 100 characters.",
-      });
-    }
-
-    if (cleanProduct.length > 100) {
-      return res.status(400).json({
-        success: false,
-        message: "Product name must not exceed 100 characters.",
+        message: "Name and product name must not exceed 100 characters.",
       });
     }
 
@@ -614,20 +672,21 @@ app.post("/api/reviews", async (req, res) => {
 
 // ==================== CUSTOMER SIGNUP ====================
 
-// ==================== CUSTOMER SIGNUP ====================
-
 app.post("/api/customer/signup", async (req, res) => {
   try {
     const { name, email, phone, password } = req.body || {};
 
     const cleanName = typeof name === "string" ? name.trim() : "";
-
     const cleanEmail =
       typeof email === "string" ? email.trim().toLowerCase() : "";
-
     const cleanPhone = typeof phone === "string" ? phone.trim() : "";
 
-    if (!cleanName || !cleanPhone || !password) {
+    if (
+      !cleanName ||
+      !cleanPhone ||
+      typeof password !== "string" ||
+      !password
+    ) {
       return res.status(400).json({
         success: false,
         message: "Please complete all required fields.",
@@ -662,18 +721,13 @@ app.post("/api/customer/signup", async (req, res) => {
       });
     }
 
-    if (
-      typeof password !== "string" ||
-      password.length < 8 ||
-      password.length > 72
-    ) {
+    if (password.length < 8 || password.length > 72) {
       return res.status(400).json({
         success: false,
         message: "Password must contain 8–72 characters.",
       });
     }
 
-    // Check whether the phone number is already registered.
     const existingPhone = await Customer.findOne({
       phone: cleanPhone,
     });
@@ -686,7 +740,6 @@ app.post("/api/customer/signup", async (req, res) => {
       });
     }
 
-    // Check email only when supplied.
     if (cleanEmail) {
       const existingEmail = await Customer.findOne({
         email: cleanEmail,
@@ -709,7 +762,6 @@ app.post("/api/customer/signup", async (req, res) => {
       password: hashedPassword,
     });
 
-    // Use customerId consistently.
     const token = jwt.sign(
       {
         customerId: customer._id.toString(),
@@ -719,10 +771,11 @@ app.post("/api/customer/signup", async (req, res) => {
       { expiresIn: "7d" },
     );
 
+    res.cookie("customerToken", token, CUSTOMER_COOKIE_OPTIONS);
+
     return res.status(201).json({
       success: true,
       message: "Your LittleWonders account has been created!",
-      token,
       customer: {
         id: customer._id,
         name: customer.name,
@@ -749,8 +802,6 @@ app.post("/api/customer/signup", async (req, res) => {
 
 // ==================== CUSTOMER LOGIN ====================
 
-// ==================== CUSTOMER LOGIN ====================
-
 app.post("/api/customer/login", async (req, res) => {
   try {
     const { identifier, password } = req.body || {};
@@ -768,7 +819,6 @@ app.post("/api/customer/login", async (req, res) => {
     }
 
     const normalizedIdentifier = identifier.trim().toLowerCase();
-
     const isPhone = /^[6-9]\d{9}$/.test(normalizedIdentifier);
 
     const customer = await Customer.findOne(
@@ -793,7 +843,6 @@ app.post("/api/customer/login", async (req, res) => {
       });
     }
 
-    // Use customerId, matching signup and requireCustomer.
     const token = jwt.sign(
       {
         customerId: customer._id.toString(),
@@ -803,18 +852,16 @@ app.post("/api/customer/login", async (req, res) => {
       { expiresIn: "7d" },
     );
 
-    const customerData = customer.toObject();
-    delete customerData.password;
+    res.cookie("customerToken", token, CUSTOMER_COOKIE_OPTIONS);
 
     return res.status(200).json({
       success: true,
       message: "Login successful.",
-      token,
       customer: {
-        id: customerData._id,
-        name: customerData.name,
-        email: customerData.email || "",
-        phone: customerData.phone,
+        id: customer._id,
+        name: customer.name,
+        email: customer.email || "",
+        phone: customer.phone,
       },
     });
   } catch (error) {
@@ -825,6 +872,17 @@ app.post("/api/customer/login", async (req, res) => {
       message: "Unable to log in. Please try again.",
     });
   }
+});
+
+// ==================== CUSTOMER LOGOUT ====================
+
+app.post("/api/customer/logout", (req, res) => {
+  res.clearCookie("customerToken", COOKIE_OPTIONS);
+
+  return res.status(200).json({
+    success: true,
+    message: "Logged out successfully.",
+  });
 });
 
 // ==================== GET LOGGED-IN CUSTOMER ====================
@@ -845,7 +903,7 @@ app.get("/api/customer/me", requireCustomer, async (req, res) => {
       customer: {
         id: customer._id,
         name: customer.name,
-        email: customer.email,
+        email: customer.email || "",
         phone: customer.phone,
       },
     });
@@ -859,7 +917,7 @@ app.get("/api/customer/me", requireCustomer, async (req, res) => {
   }
 });
 
-// ==================== GET LOGGED-IN CUSTOMER ORDERS ====================
+// ==================== GET CUSTOMER ORDERS ====================
 
 app.get("/api/customer/orders", requireCustomer, async (req, res) => {
   try {
@@ -886,13 +944,10 @@ app.get("/api/customer/orders", requireCustomer, async (req, res) => {
 
 // ==================== CHECKOUT API ====================
 
-// ==================== CHECKOUT API ====================
-
 app.post("/api/checkout", requireCustomer, async (req, res) => {
   try {
     const { customer, items } = req.body || {};
 
-    // 1. Verify the logged-in customer
     const loggedInCustomer = await Customer.findById(req.customerId);
 
     if (!loggedInCustomer) {
@@ -902,7 +957,6 @@ app.post("/api/checkout", requireCustomer, async (req, res) => {
       });
     }
 
-    // 2. Validate delivery details
     if (
       !customer ||
       typeof customer.address !== "string" ||
@@ -921,7 +975,6 @@ app.post("/api/checkout", requireCustomer, async (req, res) => {
     const address = customer.address.trim();
     const city = customer.city.trim();
     const pincode = customer.pincode.trim();
-
     const notes =
       typeof customer.notes === "string" ? customer.notes.trim() : "";
 
@@ -944,7 +997,6 @@ app.post("/api/checkout", requireCustomer, async (req, res) => {
       });
     }
 
-    // 3. Validate cart items
     if (!Array.isArray(items) || items.length === 0 || items.length > 100) {
       return res.status(400).json({
         success: false,
@@ -964,7 +1016,6 @@ app.post("/api/checkout", requireCustomer, async (req, res) => {
 
       const quantity = Number(item.quantity);
       const price = Number(item.price);
-
       const productName = typeof item.name === "string" ? item.name.trim() : "";
 
       if (
@@ -992,35 +1043,26 @@ app.post("/api/checkout", requireCustomer, async (req, res) => {
 
       safeItems.push({
         productId: item.productId ?? "N/A",
-
         name: productName,
-
         quantity,
-
         price,
-
         subtotal: price * quantity,
-
         variantKey:
           typeof item.variantKey === "string"
             ? item.variantKey.slice(0, 300)
             : "",
-
         variantLabel:
           typeof item.variantLabel === "string"
             ? item.variantLabel.slice(0, 1000)
             : "",
-
         optionSummary:
           typeof item.optionSummary === "string"
             ? item.optionSummary.slice(0, 1000)
             : "",
-
         selectedOptions,
       });
     }
 
-    // 4. Calculate order total on the backend
     const total = safeItems.reduce((sum, item) => sum + item.subtotal, 0);
 
     if (!Number.isFinite(total) || total > 1000000000) {
@@ -1030,30 +1072,24 @@ app.post("/api/checkout", requireCustomer, async (req, res) => {
       });
     }
 
-    // 5. Save the order using authenticated customer details
     const savedOrder = await Order.create({
       customerId: loggedInCustomer._id,
-
       customer: {
         name: loggedInCustomer.name,
         phone: loggedInCustomer.phone,
-        email: loggedInCustomer.email,
+        email: loggedInCustomer.email || "",
         address,
         city,
         pincode,
         notes,
       },
-
       items: safeItems,
-
       total,
       paymentStatus: "Unpaid",
       amountPaid: 0,
-
       status: "Pending",
     });
 
-    // 6. Send success response
     return res.status(201).json({
       success: true,
       message:
@@ -1072,7 +1108,6 @@ app.post("/api/checkout", requireCustomer, async (req, res) => {
 
 // ==================== ADMIN EXPENSE APIs ====================
 
-// Get all expenses and financial settings
 app.get("/api/admin/expenses", requireAdmin, async (req, res) => {
   try {
     const [expenses, settings] = await Promise.all([
@@ -1095,13 +1130,10 @@ app.get("/api/admin/expenses", requireAdmin, async (req, res) => {
   }
 });
 
-// Add a new expense
 app.post("/api/admin/expenses", requireAdmin, async (req, res) => {
   try {
     const { itemName, price, person } = req.body || {};
-
     const cleanName = typeof itemName === "string" ? itemName.trim() : "";
-
     const numericPrice = Number(price);
 
     if (
@@ -1142,7 +1174,6 @@ app.post("/api/admin/expenses", requireAdmin, async (req, res) => {
   }
 });
 
-// Delete an expense
 app.delete("/api/admin/expenses/:id", requireAdmin, async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
@@ -1175,7 +1206,8 @@ app.delete("/api/admin/expenses/:id", requireAdmin, async (req, res) => {
   }
 });
 
-// Update order payment details
+// ==================== ADMIN ORDER PAYMENT API ====================
+
 app.patch("/api/admin/orders/:id/payment", requireAdmin, async (req, res) => {
   try {
     const { amountPaid } = req.body || {};
@@ -1254,11 +1286,11 @@ app.patch("/api/admin/orders/:id/payment", requireAdmin, async (req, res) => {
   }
 });
 
-// Add amount to total received
+// ==================== TOTAL RECEIVED API ====================
+
 app.patch("/api/admin/expenses/received", requireAdmin, async (req, res) => {
   try {
     const { amountToAdd } = req.body || {};
-
     const amount = Number(amountToAdd);
 
     if (
@@ -1275,7 +1307,7 @@ app.patch("/api/admin/expenses/received", requireAdmin, async (req, res) => {
       });
     }
 
-    const settings = await FinancialSetting.findByIdAndReplace(
+    const settings = await FinancialSetting.findByIdAndUpdate(
       "financial-summary",
       {
         $inc: { totalReceived: amount },
@@ -1305,7 +1337,6 @@ app.patch("/api/admin/expenses/received", requireAdmin, async (req, res) => {
 
 // ==================== ADMIN REVIEW APIs ====================
 
-// Get all customer reviews for admin
 app.get("/api/admin/reviews", requireAdmin, async (req, res) => {
   try {
     const reviews = await Review.find()
@@ -1327,11 +1358,9 @@ app.get("/api/admin/reviews", requireAdmin, async (req, res) => {
   }
 });
 
-// Approve or reject a customer review
 app.patch("/api/admin/reviews/:id/status", requireAdmin, async (req, res) => {
   try {
     const { status } = req.body || {};
-
     const allowedStatuses = ["Pending", "Approved", "Rejected"];
 
     if (!allowedStatuses.includes(status)) {
@@ -1379,7 +1408,6 @@ app.patch("/api/admin/reviews/:id/status", requireAdmin, async (req, res) => {
   }
 });
 
-// Delete a customer review
 app.delete("/api/admin/reviews/:id", requireAdmin, async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
@@ -1412,97 +1440,87 @@ app.delete("/api/admin/reviews/:id", requireAdmin, async (req, res) => {
   }
 });
 
-// ==================== ADMIN AUTHENTICATION ====================
+// ==================== ADMIN LOGIN ====================
 
-function requireAdmin(req, res, next) {
-  const header = req.headers.authorization || "";
-
-  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-
-  if (!token) {
-    return res.status(401).json({
-      success: false,
-      message: "Admin login required.",
-    });
-  }
-
+app.post("/api/admin/login", async (req, res) => {
   try {
-    const payload = jwt.verify(token, process.env.ADMIN_JWT_SECRET);
+    const { username, password } = req.body || {};
 
-    if (payload.role !== "admin") {
-      return res.status(403).json({
+    if (
+      !process.env.ADMIN_USERNAME ||
+      (!process.env.ADMIN_PASSWORD && !process.env.ADMIN_PASSWORD_HASH) ||
+      !process.env.ADMIN_JWT_SECRET
+    ) {
+      return res.status(503).json({
         success: false,
-        message: "Admin access required.",
+        message: "Admin login is not configured on the server.",
       });
     }
 
-    req.admin = payload;
-    next();
-  } catch {
-    return res.status(401).json({
-      success: false,
-      message: "Your admin session expired. Please log in again.",
-    });
-  }
-}
+    const usernameMatches =
+      typeof username === "string" && username === process.env.ADMIN_USERNAME;
 
-// Admin login
-app.post("/api/admin/login", async (req, res) => {
-  const { username, password } = req.body || {};
+    let passwordMatches = false;
 
-  if (
-    !process.env.ADMIN_USERNAME ||
-    (!process.env.ADMIN_PASSWORD && !process.env.ADMIN_PASSWORD_HASH) ||
-    !process.env.ADMIN_JWT_SECRET
-  ) {
-    return res.status(503).json({
-      success: false,
-      message: "Admin login is not configured on the server.",
-    });
-  }
-
-  const usernameMatches =
-    typeof username === "string" && username === process.env.ADMIN_USERNAME;
-
-  let passwordMatches = false;
-
-  if (typeof password === "string") {
-    if (process.env.ADMIN_PASSWORD_HASH) {
-      passwordMatches = await bcrypt.compare(
-        password,
-        process.env.ADMIN_PASSWORD_HASH,
-      );
-    } else {
-      passwordMatches = password === process.env.ADMIN_PASSWORD;
+    if (typeof password === "string") {
+      if (process.env.ADMIN_PASSWORD_HASH) {
+        // Use bcrypt when a hashed password is configured.
+        passwordMatches = await bcrypt.compare(
+          password,
+          process.env.ADMIN_PASSWORD_HASH,
+        );
+      } else if (process.env.ADMIN_PASSWORD) {
+        // Use direct comparison for a plain-text password.
+        passwordMatches = password === process.env.ADMIN_PASSWORD;
+      }
     }
-  }
 
-  if (!usernameMatches || !passwordMatches) {
-    return res.status(401).json({
+    if (!usernameMatches || !passwordMatches) {
+      return res.status(401).json({
+        success: false,
+        message: "Incorrect username or password.",
+      });
+    }
+
+    const token = jwt.sign(
+      {
+        role: "admin",
+        username: process.env.ADMIN_USERNAME,
+      },
+      process.env.ADMIN_JWT_SECRET,
+      { expiresIn: "8h" },
+    );
+
+    res.cookie("adminToken", token, ADMIN_COOKIE_OPTIONS);
+
+    return res.status(200).json({
+      success: true,
+      message: "Admin login successful.",
+      username: process.env.ADMIN_USERNAME,
+    });
+  } catch (error) {
+    console.error("Admin login error:", error);
+
+    return res.status(500).json({
       success: false,
-      message: "Incorrect username or password.",
+      message: "Unable to log in. Please try again.",
     });
   }
+});
 
-  const token = jwt.sign(
-    {
-      role: "admin",
-      username: process.env.ADMIN_USERNAME,
-    },
-    process.env.ADMIN_JWT_SECRET,
-    { expiresIn: "8h" },
-  );
+// ==================== ADMIN LOGOUT ====================
 
-  return res.json({
+app.post("/api/admin/logout", (req, res) => {
+  res.clearCookie("adminToken", COOKIE_OPTIONS);
+
+  return res.status(200).json({
     success: true,
-    token,
-    username: process.env.ADMIN_USERNAME,
+    message: "Admin logged out successfully.",
   });
 });
 
 // ==================== ADMIN ORDER APIs ====================
 
-// Get all orders
 app.get("/api/admin/orders", requireAdmin, async (req, res) => {
   try {
     const orders = await Order.find().sort({ createdAt: -1 }).limit(500).lean();
@@ -1521,7 +1539,6 @@ app.get("/api/admin/orders", requireAdmin, async (req, res) => {
   }
 });
 
-// Update order status
 app.patch("/api/admin/orders/:id/status", requireAdmin, async (req, res) => {
   const allowed = ["Pending", "Confirmed", "Completed", "Cancelled"];
 
@@ -1533,6 +1550,13 @@ app.patch("/api/admin/orders/:id/status", requireAdmin, async (req, res) => {
   }
 
   try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid order ID.",
+      });
+    }
+
     const order = await Order.findByIdAndUpdate(
       req.params.id,
       { status: req.body.status },
@@ -1554,6 +1578,8 @@ app.patch("/api/admin/orders/:id/status", requireAdmin, async (req, res) => {
       order,
     });
   } catch (error) {
+    console.error("Update order status error:", error.message);
+
     return res.status(400).json({
       success: false,
       message: "Could not update order status.",
@@ -1563,7 +1589,6 @@ app.patch("/api/admin/orders/:id/status", requireAdmin, async (req, res) => {
 
 // ==================== ADMIN CONTACT APIs ====================
 
-// Get all contact messages
 app.get("/api/admin/messages", requireAdmin, async (req, res) => {
   try {
     const messages = await ContactMessage.find()
@@ -1585,7 +1610,6 @@ app.get("/api/admin/messages", requireAdmin, async (req, res) => {
   }
 });
 
-// Update contact message status
 app.patch("/api/admin/messages/:id/status", requireAdmin, async (req, res) => {
   const allowed = ["Unread", "Read", "Replied"];
 
@@ -1597,6 +1621,13 @@ app.patch("/api/admin/messages/:id/status", requireAdmin, async (req, res) => {
   }
 
   try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid message ID.",
+      });
+    }
+
     const message = await ContactMessage.findByIdAndUpdate(
       req.params.id,
       { status: req.body.status },
@@ -1618,6 +1649,8 @@ app.patch("/api/admin/messages/:id/status", requireAdmin, async (req, res) => {
       message,
     });
   } catch (error) {
+    console.error("Update message status error:", error.message);
+
     return res.status(400).json({
       success: false,
       message: "Could not update message status.",
@@ -1636,11 +1669,20 @@ app.get("/", (req, res) => {
 const PORT = process.env.PORT || 5000;
 
 async function startServer() {
-  if (!process.env.MONGODB_URI) {
-    console.error(
-      "MONGODB_URI is missing. Add your MongoDB Atlas connection string to backend .env.",
-    );
+  const requiredEnvironmentVariables = [
+    "MONGODB_URI",
+    "CUSTOMER_JWT_SECRET",
+    "ADMIN_JWT_SECRET",
+  ];
 
+  const missingVariables = requiredEnvironmentVariables.filter(
+    (key) => !process.env[key],
+  );
+
+  if (missingVariables.length > 0) {
+    console.error(
+      `Missing required environment variables: ${missingVariables.join(", ")}`,
+    );
     process.exit(1);
   }
 
@@ -1654,7 +1696,6 @@ async function startServer() {
     });
   } catch (error) {
     console.error("MongoDB connection failed:", error.message);
-
     process.exit(1);
   }
 }
